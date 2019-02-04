@@ -103,7 +103,7 @@ set params(AD9171,00) {2 1 1 4 1 16 16}
 set params(AD9171,03) {2 2 1 2 1 16 16}
 set params(AD9171,device_code) 4
 
-# AD9172
+# AD9172/AD9174/AD9176
 #                 Mode M L S F HD N NP
 set params(AD9172,00) {2 1 1 4 1 16 16}
 set params(AD9172,01) {4 2 1 4 1 16 16}
@@ -120,7 +120,7 @@ set params(AD9172,20) {1 8 4 1 1 16 16}
 set params(AD9172,21) {1 8 8 2 1 16 16}
 set params(AD9172,device_code) 5
 
-# AD9173
+# AD9173/AD9175
 #                 Mode M L S F HD N NP
 set params(AD9173,00) {2 1 1 4 1 16 16}
 set params(AD9173,01) {4 2 1 4 1 16 16}
