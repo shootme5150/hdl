@@ -35,10 +35,11 @@
 `timescale 1ns / 1ps
 
 module axi_fan_control #(
+  parameter     ID = 0,
   parameter     PWM_FREQUENCY_HZ  = 5000) (
   
   input         tacho,
-  output        intr,
+  output  reg   irq,
   output        pwm,
 
   //axi interface
@@ -62,53 +63,58 @@ module axi_fan_control #(
   output                  s_axi_rvalid,
   output      [ 1:0]      s_axi_rresp,
   output      [31:0]      s_axi_rdata,
-  input                   s_axi_rready
-);
+  input                   s_axi_rready);
 
 //local parameters
-localparam    CLK_FREQUENCY           = 100000000;
-localparam    PWM_PERIOD              = CLK_FREQUENCY / PWM_FREQUENCY_HZ;
-localparam    OVERFLOW_LIM            = CLK_FREQUENCY * 5;
-localparam    AVERAGE_DIV             = 128;
+localparam [31:0] CORE_VERSION            = {16'h0000,     /* MAJOR */
+                                              8'h01,       /* MINOR */
+                                              8'h00};      /* PATCH */ // 0.0.0
+localparam [31:0] CORE_MAGIC              = 32'h46414E43;    // FANC
+
+localparam        CLK_FREQUENCY           = 100000000;
+localparam        PWM_PERIOD              = CLK_FREQUENCY / PWM_FREQUENCY_HZ;
+localparam        OVERFLOW_LIM            = CLK_FREQUENCY * 5;
+localparam        AVERAGE_DIV             = 128;
 
 //pwm params
-localparam    PWM_ONTIME_25           = PWM_PERIOD / 4;
-localparam    PWM_ONTIME_50           = PWM_PERIOD / 2;
-localparam    PWM_ONTIME_75           = PWM_PERIOD * 3 / 4;
+localparam        PWM_ONTIME_25           = PWM_PERIOD / 4;
+localparam        PWM_ONTIME_50           = PWM_PERIOD / 2;
+localparam        PWM_ONTIME_75           = PWM_PERIOD * 3 / 4;
 
 //tacho params
-localparam    TACHO_TOL_PERCENT       = 25;
-localparam    TACHO_T25               = 3200000; // 32 ms
-localparam    TACHO_T50               = 1280000; // 12.8 ms
-localparam    TACHO_T75               = 720000; // 7.2 ms
-localparam    TACHO_T100              = 640000;
-localparam    TACHO_T25_TOL           = TACHO_T25 * TACHO_TOL_PERCENT / 100;
-localparam    TACHO_T50_TOL           = TACHO_T50 * TACHO_TOL_PERCENT / 100;
-localparam    TACHO_T75_TOL           = TACHO_T75 * TACHO_TOL_PERCENT / 100;
-localparam    TACHO_T100_TOL          = TACHO_T100 * TACHO_TOL_PERCENT / 100;
+localparam        TACHO_TOL_PERCENT       = 25;
+localparam        TACHO_T25               = 3200000; // 32 ms
+localparam        TACHO_T50               = 1280000; // 12.8 ms
+localparam        TACHO_T75               = 720000; // 7.2 ms
+localparam        TACHO_T100              = 640000;
+localparam        TACHO_T25_TOL           = TACHO_T25 * TACHO_TOL_PERCENT / 100;
+localparam        TACHO_T50_TOL           = TACHO_T50 * TACHO_TOL_PERCENT / 100;
+localparam        TACHO_T75_TOL           = TACHO_T75 * TACHO_TOL_PERCENT / 100;
+localparam        TACHO_T100_TOL          = TACHO_T100 * TACHO_TOL_PERCENT / 100;
 
 //temperature thresholds defined to match sysmon reg values
-localparam    TEMP_05                 = 16'h8f5e;
-localparam    TEMP_20                 = 16'h96f0;
-localparam    TEMP_40                 = 16'ha0ff;
-localparam    TEMP_60                 = 16'hab03;
-localparam    TEMP_70                 = 16'hb00a;
-localparam    TEMP_80                 = 16'hb510;
-localparam    TEMP_90                 = 16'hba17;
-localparam    TEMP_95                 = 16'hbc9b;
+localparam        TEMP_05                 = 16'h8f5e;
+localparam        TEMP_20                 = 16'h96f0;
+localparam        TEMP_40                 = 16'ha0ff;
+localparam        TEMP_60                 = 16'hab03;
+localparam        TEMP_70                 = 16'hb00a;
+localparam        TEMP_80                 = 16'hb510;
+localparam        TEMP_90                 = 16'hba17;
+localparam        TEMP_95                 = 16'hbc9b;
 
 //state machine states
-localparam    INIT                    = 8'h00;
-localparam    DRP_WAIT_EOC            = 8'h01;
-localparam    DRP_WAIT_DRDY           = 8'h02;
-localparam    DRP_READ_TEMP           = 8'h03;
-localparam    DRP_READ_TEMP_WAIT_DRDY = 8'h04;
-localparam    GET_TACHO               = 8'h05;
-localparam    EVAL_TEMP               = 8'h06;
-localparam    EVAL_PWM                = 8'h07;
-localparam    SET_PWM                 = 8'h08;
-localparam    EVAL_TACHO              = 8'h09;
+localparam        INIT                    = 8'h00;
+localparam        DRP_WAIT_EOC            = 8'h01;
+localparam        DRP_WAIT_DRDY           = 8'h02;
+localparam        DRP_READ_TEMP           = 8'h03;
+localparam        DRP_READ_TEMP_WAIT_DRDY = 8'h04;
+localparam        GET_TACHO               = 8'h05;
+localparam        EVAL_TEMP               = 8'h06;
+localparam        EVAL_PWM                = 8'h07;
+localparam        SET_PWM                 = 8'h08;
+localparam        EVAL_TACHO              = 8'h09;
 
+reg   [31:0]  up_scratch = 'd0;
 reg   [7:0]   state = INIT;
 reg   [7:0]   drp_daddr = 'h0;
 reg   [15:0]  drp_di = 'h0;
@@ -116,7 +122,6 @@ reg   [1:0]   drp_den_reg = 'h0;
 reg   [1:0]   drp_dwe_reg = 'h0;
 reg   [15:0]  sysmone_temp = 'h0;
 reg           temp_increase_alarm = 'h0;
-reg           temp_increase_alarm_int = 'h0;
 reg           tacho_alarm = 'h0;
 reg           tacho_alarm_int = 'h0;
 
@@ -126,7 +131,6 @@ reg           up_tacho_en = 'h0;
 reg   [7:0]   tacho_avg_cnt = 'h0;
 reg   [31:0]  tacho_avg_sum = 'h0;
 reg   [31:0]  tacho_meas = 'h0;
-reg   [31:0]  up_ier = 'h0;
 reg           tacho_delayed = 'h0;
 reg           tacho_meas_new = 'h0;
 reg           tacho_meas_ack = 'h0;
@@ -138,7 +142,6 @@ reg   [31:0]  pwm_ontime = 'h0;
 reg   [31:0]  pwm_ontime_req = 'h0;
 reg           counter_overflow = 'h0;
 reg           pwm_change_done = 1'b1;
-reg           pwm_change_done_int = 'h0;
 reg           pulse_gen_load_config = 'h0;
 
 reg   [31:0]  up_pwm_ontime = 'd0;
@@ -146,6 +149,8 @@ reg           up_wack = 'd0;
 reg   [31:0]  up_rdata = 'd0;
 reg           up_rack = 'd0;
 reg           up_resetn = 1'b1;
+reg   [2:0]   up_irq_mask = 3'b111;
+reg   [2:0]   up_irq_source = 3'h0;
 
 wire          sys_resetn;
 wire          counter_resetn;
@@ -154,24 +159,34 @@ wire          drp_drdy;
 wire          drp_eoc;
 wire          drp_eos;
 
+wire          pwm_change_done_int;
 wire          pulse_gen_out;
 wire          up_clk;
 wire          up_rreq_s;
-wire  [2:0]   up_raddr_s;
+wire  [4:0]   up_raddr_s;
 wire          up_wreq_s;
-wire  [2:0]   up_waddr_s;
+wire  [4:0]   up_waddr_s;
 wire  [31:0]  up_wdata_s;
+wire  [2:0]   up_irq_pending;
+wire  [2:0]   up_irq_trigger;
+wire  [2:0]   up_irq_source_clear;
 
 assign up_clk = s_axi_aclk;
 assign sys_resetn = up_resetn & s_axi_aresetn;
 assign pwm = ~pulse_gen_out; //reverse polarity because the board is also reversing it
-assign intr = temp_increase_alarm_int | tacho_alarm_int | pwm_change_done_int;
+assign pwm_change_done_int = counter_overflow & !pwm_change_done;
+
+//IRQ handling
+assign up_irq_pending = ~up_irq_mask & up_irq_source;
+assign up_irq_trigger  = {temp_increase_alarm, tacho_alarm, pwm_change_done_int};
+assign up_irq_source_clear = (up_wreq_s == 1'b1 && up_waddr_s == 5'h18) ? up_wdata_s[2:0] : 3'b000;
+
 //switching the reset signal for the counter
 //counter is used to measure tacho and to provide delay between pwm_ontime changes
 assign counter_resetn = (pwm_change_done ) ? (!tacho_edge_det) : ((!pwm_change_done) & (!counter_overflow));
 
 up_axi #(
-  .ADDRESS_WIDTH(3))
+  .ADDRESS_WIDTH(5))
 i_up_axi (
   .up_rstn (s_axi_aresetn),
   .up_clk (up_clk),
@@ -308,7 +323,7 @@ always @(posedge up_clk)
       DRP_WAIT_EOC : begin
         if (drp_eoc == 1'b1) begin
           //Clearing AVG bits for Configreg0
-          drp_di <= drp_do & 16'h03_FF;
+          drp_di <= drp_do & 16'h03FF;
           drp_daddr <= 8'h40;
           drp_den_reg <= 2'h2;
           // performing write
@@ -470,48 +485,34 @@ always @(posedge up_clk)
 always @(posedge up_clk) begin
   if (sys_resetn == 1'b0) begin
     up_wack <= 'd0;
-    temp_increase_alarm_int <= 'd0;
-    tacho_alarm_int <= 'd0;
-    pwm_change_done_int <= 'd0;
     up_pwm_ontime <= 'd0;
     up_tacho_val <= 'd0;
     up_tacho_tol <= 'd0;
     up_tacho_en <= 'd0;
-    up_ier <= 'd0;
+    up_scratch <= 'd0;
+    up_irq_mask <= 3'b111;
     up_resetn <= 1'd1;
   end else begin
     up_wack <= up_wreq_s;
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h0)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h10)) begin
       up_resetn <= up_wdata_s[0];
+    end  
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h02)) begin
+      up_scratch <= up_wdata_s;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h1)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h11)) begin
       up_pwm_ontime <= up_wdata_s;
       up_tacho_en <= 1'b0;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h5)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h15)) begin
       up_tacho_val <= up_wdata_s;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h6)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h16)) begin
       up_tacho_tol <= up_wdata_s;
       up_tacho_en <= 1'b1;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h7)) begin
-      up_ier <= up_wdata_s;
-    end
-    if (counter_overflow & up_ier[2]) begin
-      pwm_change_done_int <= 1'b1;
-    end else if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h4)) begin
-      pwm_change_done_int <= pwm_change_done_int & ~up_wdata_s [2];
-    end
-    if (temp_increase_alarm & up_ier[1]) begin
-      temp_increase_alarm_int <= 1'b1;
-    end else if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h4)) begin
-      temp_increase_alarm_int <= temp_increase_alarm_int & ~up_wdata_s [1];
-    end
-    if (tacho_alarm & up_ier[0]) begin
-      tacho_alarm_int <= 1'b1;
-    end else if ((up_wreq_s == 1'b1) && (up_waddr_s == 3'h4)) begin
-      tacho_alarm_int <= tacho_alarm_int & ~up_wdata_s [0];
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h17)) begin
+      up_irq_mask <= up_wdata_s[2:0];
     end
   end
 end
@@ -525,19 +526,42 @@ always @(posedge up_clk) begin
     up_rack <= up_rreq_s;
     if (up_rreq_s == 1'b1) begin
       case (up_raddr_s)
-        3'h0: up_rdata <= up_resetn;
-        3'h1: up_rdata <= pwm_ontime;
-        3'h2: up_rdata <= up_tacho_avg_sum;
-        3'h3: up_rdata <= sysmone_temp;
-        3'h4: up_rdata <= { 30'd0, temp_increase_alarm_int, tacho_alarm_int};
-        3'h5: up_rdata <= up_tacho_val;
-        3'h6: up_rdata <= up_tacho_tol;
-        3'h7: up_rdata <= up_ier;
+        5'h00: up_rdata <= CORE_VERSION;
+        5'h01: up_rdata <= ID;
+        5'h02: up_rdata <= up_scratch;
+        5'h03: up_rdata <= CORE_MAGIC;
+        5'h10: up_rdata <= up_resetn;
+        5'h11: up_rdata <= pwm_ontime;
+        5'h12: up_rdata <= PWM_PERIOD;
+        5'h13: up_rdata <= up_tacho_avg_sum;
+        5'h14: up_rdata <= sysmone_temp;
+        5'h15: up_rdata <= up_tacho_val;
+        5'h16: up_rdata <= up_tacho_tol;
+        5'h17: up_rdata <= up_irq_mask;
+        5'h18: up_rdata <= up_irq_pending;
+        5'h19: up_rdata <= up_irq_source;
         default: up_rdata <= 0;
       endcase
     end else begin
       up_rdata <= 32'd0;
     end
+  end
+end
+
+//IRQ handling
+always @(posedge up_clk) begin
+  if (sys_resetn == 1'b0) begin
+    irq <= 1'b0;
+  end else begin
+    irq <= |up_irq_pending;
+  end
+end
+
+always @(posedge up_clk) begin
+  if (sys_resetn == 1'b0) begin
+    up_irq_source <= 3'b000;
+  end else begin
+    up_irq_source <= up_irq_trigger | (up_irq_source & ~up_irq_source_clear);
   end
 end
 
