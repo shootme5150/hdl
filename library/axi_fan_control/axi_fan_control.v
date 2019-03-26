@@ -36,11 +36,21 @@
 
 module axi_fan_control #(
   parameter     ID = 0,
-  parameter     PWM_FREQUENCY_HZ  = 5000) (
-  
-  input         tacho,
-  output  reg   irq,
-  output        pwm,
+  parameter     PWM_FREQUENCY_HZ  = 5000,
+
+  //temperature thresholds defined to match sysmon reg values
+  parameter     THRESH_PWM_000    = 16'h8f5e, //TEMP_05
+  parameter     THRESH_PWM_025_L  = 16'h96f0, //TEMP_20
+  parameter     THRESH_PWM_025_H  = 16'ha0ff, //TEMP_40
+  parameter     THRESH_PWM_050_L  = 16'hab03, //TEMP_60
+  parameter     THRESH_PWM_050_H  = 16'hb00a, //TEMP_70
+  parameter     THRESH_PWM_075_L  = 16'hb510, //TEMP_80
+  parameter     THRESH_PWM_075_H  = 16'hba17, //TEMP_90
+  parameter     THRESH_PWM_100    = 16'hbc9b) ( //TEMP_95
+
+    input         tacho,
+    output  reg   irq,
+    output        pwm,
 
   //axi interface
   input                   s_axi_aclk,
@@ -92,16 +102,6 @@ localparam        TACHO_T50_TOL           = TACHO_T50 * TACHO_TOL_PERCENT / 100;
 localparam        TACHO_T75_TOL           = TACHO_T75 * TACHO_TOL_PERCENT / 100;
 localparam        TACHO_T100_TOL          = TACHO_T100 * TACHO_TOL_PERCENT / 100;
 
-//temperature thresholds defined to match sysmon reg values
-localparam        TEMP_05                 = 16'h8f5e;
-localparam        TEMP_20                 = 16'h96f0;
-localparam        TEMP_40                 = 16'ha0ff;
-localparam        TEMP_60                 = 16'hab03;
-localparam        TEMP_70                 = 16'hb00a;
-localparam        TEMP_80                 = 16'hb510;
-localparam        TEMP_90                 = 16'hba17;
-localparam        TEMP_95                 = 16'hbc9b;
-
 //state machine states
 localparam        INIT                    = 8'h00;
 localparam        DRP_WAIT_EOC            = 8'h01;
@@ -123,7 +123,6 @@ reg   [1:0]   drp_dwe_reg = 'h0;
 reg   [15:0]  sysmone_temp = 'h0;
 reg           temp_increase_alarm = 'h0;
 reg           tacho_alarm = 'h0;
-reg           tacho_alarm_int = 'h0;
 
 reg   [31:0]  up_tacho_val = 'h0;
 reg   [31:0]  up_tacho_tol = 'h0;
@@ -138,21 +137,21 @@ reg           tacho_edge_det = 'h0;
 reg   [31:0]  up_tacho_avg_sum = 'h0;
 
 reg   [31:0]  counter_reg = 'h0;
-reg   [31:0]  pwm_ontime = 'h0;
-reg   [31:0]  pwm_ontime_req = 'h0;
+reg   [31:0]  pwm_width = 'h0;
+reg   [31:0]  pwm_width_req = 'h0;
 reg           counter_overflow = 'h0;
 reg           pwm_change_done = 1'b1;
 reg           pulse_gen_load_config = 'h0;
+reg           tacho_meas_int = 'h0;
 
-reg   [31:0]  up_pwm_ontime = 'd0;
+reg   [31:0]  up_pwm_width = 'd0;
 reg           up_wack = 'd0;
 reg   [31:0]  up_rdata = 'd0;
 reg           up_rack = 'd0;
 reg           up_resetn = 1'b1;
-reg   [2:0]   up_irq_mask = 3'b111;
-reg   [2:0]   up_irq_source = 3'h0;
+reg   [3:0]   up_irq_mask = 4'b1111;
+reg   [3:0]   up_irq_source = 4'h0;
 
-wire          sys_resetn;
 wire          counter_resetn;
 wire  [15:0]  drp_do;
 wire          drp_drdy;
@@ -163,30 +162,29 @@ wire          pwm_change_done_int;
 wire          pulse_gen_out;
 wire          up_clk;
 wire          up_rreq_s;
-wire  [4:0]   up_raddr_s;
+wire  [7:0]   up_raddr_s;
 wire          up_wreq_s;
-wire  [4:0]   up_waddr_s;
+wire  [7:0]   up_waddr_s;
 wire  [31:0]  up_wdata_s;
-wire  [2:0]   up_irq_pending;
-wire  [2:0]   up_irq_trigger;
-wire  [2:0]   up_irq_source_clear;
+wire  [3:0]   up_irq_pending;
+wire  [3:0]   up_irq_trigger;
+wire  [3:0]   up_irq_source_clear;
 
 assign up_clk = s_axi_aclk;
-assign sys_resetn = up_resetn & s_axi_aresetn;
-assign pwm = ~pulse_gen_out; //reverse polarity because the board is also reversing it
+assign pwm = ~pulse_gen_out & up_resetn; //reverse polarity because the board is also reversing it
 assign pwm_change_done_int = counter_overflow & !pwm_change_done;
 
 //IRQ handling
 assign up_irq_pending = ~up_irq_mask & up_irq_source;
-assign up_irq_trigger  = {temp_increase_alarm, tacho_alarm, pwm_change_done_int};
-assign up_irq_source_clear = (up_wreq_s == 1'b1 && up_waddr_s == 5'h18) ? up_wdata_s[2:0] : 3'b000;
+assign up_irq_trigger  = {tacho_meas_int, temp_increase_alarm, tacho_alarm, pwm_change_done_int};
+assign up_irq_source_clear = (up_wreq_s == 1'b1 && up_waddr_s == 8'h11) ? up_wdata_s[3:0] : 4'b0000;
 
 //switching the reset signal for the counter
 //counter is used to measure tacho and to provide delay between pwm_ontime changes
 assign counter_resetn = (pwm_change_done ) ? (!tacho_edge_det) : ((!pwm_change_done) & (!counter_overflow));
 
 up_axi #(
-  .ADDRESS_WIDTH(5))
+  .ADDRESS_WIDTH(8))
 i_up_axi (
   .up_rstn (s_axi_aresetn),
   .up_clk (up_clk),
@@ -270,7 +268,7 @@ inst_sysmon (
   .DEN(drp_den_reg[0]),
   .DI(drp_di),
   .DWE(drp_dwe_reg[0]),
-  .RESET(!sys_resetn),
+  .RESET(!up_resetn),
   .DO(drp_do),
   .DRDY(drp_drdy),
   .EOC(drp_eoc),
@@ -283,8 +281,8 @@ util_pulse_gen #(
   .PULSE_PERIOD(0))
 util_pulse_gen_i(
   .clk (up_clk),
-  .rstn (sys_resetn),
-  .pulse_width (pwm_ontime),
+  .rstn (up_resetn),
+  .pulse_width (pwm_width),
   .pulse_period (PWM_PERIOD),
   .load_config (pulse_gen_load_config),
   .pulse (pulse_gen_out)
@@ -292,7 +290,7 @@ util_pulse_gen_i(
 
 //state machine
 always @(posedge up_clk)
-  if (sys_resetn == 1'b0) begin
+  if (up_resetn == 1'b0) begin
     tacho_alarm <= 'h0;
     drp_den_reg <= 'h0;
     drp_dwe_reg <= 'h0;
@@ -302,10 +300,11 @@ always @(posedge up_clk)
     tacho_meas_ack <= 'h0;
     pulse_gen_load_config <= 'h0;
     sysmone_temp <= 'h0;
-    pwm_ontime_req <= 'h0;
-    pwm_ontime <= 'h0;
+    pwm_width_req <= 'h0;
+    pwm_width <= 'h0;
     up_tacho_avg_sum <= 'h0;
     temp_increase_alarm <= 'h0;
+    tacho_meas_int <= 1'b0;
     state <= INIT;
   end else begin
 
@@ -346,6 +345,7 @@ always @(posedge up_clk)
 
       DRP_READ_TEMP : begin
         tacho_alarm <= 1'b0;
+        tacho_meas_int <= 1'b0;
         pulse_gen_load_config <= 1'b0;
         drp_daddr <= 8'h00;
         // performing read
@@ -385,37 +385,36 @@ always @(posedge up_clk)
       end
 
       EVAL_TEMP : begin
-        //pwm section
+         //pwm section
         //the pwm only has to be changed when passing through these temperature intervals
-        if (sysmone_temp < TEMP_05) begin
+        if (sysmone_temp < THRESH_PWM_000) begin
           //PWM DUTY should be 0%
-          pwm_ontime_req <= 1'b0;
-        end else if ((sysmone_temp > TEMP_20) && (sysmone_temp < TEMP_40)) begin
+          pwm_width_req <= 1'b0;
+        end else if ((sysmone_temp > THRESH_PWM_025_L) && (sysmone_temp < THRESH_PWM_025_H)) begin
           //PWM DUTY should be 25%
-          pwm_ontime_req <= PWM_ONTIME_25;
-        end else if ((sysmone_temp > TEMP_60) && (sysmone_temp < TEMP_70)) begin
+          pwm_width_req <= PWM_ONTIME_25;
+        end else if ((sysmone_temp > THRESH_PWM_050_L) && (sysmone_temp < THRESH_PWM_050_H)) begin
           //PWM DUTY should be 50%
-          pwm_ontime_req <= PWM_ONTIME_50;
-        end else if ((sysmone_temp > TEMP_80) && (sysmone_temp < TEMP_90)) begin
+          pwm_width_req <= PWM_ONTIME_50;
+        end else if ((sysmone_temp > THRESH_PWM_075_L) && (sysmone_temp < THRESH_PWM_075_H)) begin
           //PWM DUTY should be 75%
-          pwm_ontime_req <= PWM_ONTIME_75;
-        end else if (sysmone_temp > TEMP_95) begin
+          pwm_width_req <= PWM_ONTIME_75;
+        end else if (sysmone_temp > THRESH_PWM_100) begin
           //PWM DUTY should be 100%
-          pwm_ontime_req <= PWM_PERIOD;
-          //default to 50% duty cycle after reset if not within temperature intervals described above
-        end else if ((sysmone_temp > TEMP_40) && (pwm_ontime == 'h0)) begin
-          //PWM DUTY should be 100%
-          pwm_ontime_req <= PWM_ONTIME_50;
+          pwm_width_req <= PWM_PERIOD;
+          //default to 100% duty cycle after reset if not within temperature intervals described above
+        end else if ((sysmone_temp != 'h0) && (pwm_width == 'h0)) begin
+          pwm_width_req <= PWM_PERIOD;
         end else begin
           //if no changes are needed make sure to mantain current pwm
-          pwm_ontime_req <= pwm_ontime;
+          pwm_width_req <= pwm_width;
         end
         state <= EVAL_PWM;
       end
 
       EVAL_PWM : begin
         //setting alarm for temperature increase
-        if (pwm_ontime_req > pwm_ontime) begin
+        if (pwm_width_req > pwm_width) begin
           temp_increase_alarm <= 1'b1;
         end
         state <= SET_PWM;
@@ -423,12 +422,12 @@ always @(posedge up_clk)
 
       SET_PWM : begin
         temp_increase_alarm <= 1'b0;
-        if ((up_pwm_ontime != pwm_ontime) && (up_pwm_ontime >= pwm_ontime_req) && (up_pwm_ontime <= PWM_PERIOD) && (pwm_change_done)) begin
-          pwm_ontime <= up_pwm_ontime;
+        if ((up_pwm_width != pwm_width) && (up_pwm_width >= pwm_width_req) && (up_pwm_width <= PWM_PERIOD) && (pwm_change_done)) begin
+          pwm_width <= up_pwm_width;
           pulse_gen_load_config <= 1'b1;
           //clear alarm when pwm duty changes
-        end else if ((pwm_ontime != pwm_ontime_req) && (pwm_ontime_req > up_pwm_ontime) && (pwm_change_done)) begin
-          pwm_ontime <= pwm_ontime_req;
+        end else if ((pwm_width != pwm_width_req) && (pwm_width_req > up_pwm_width) && (pwm_change_done)) begin
+          pwm_width <= pwm_width_req;
           pulse_gen_load_config <= 1'b1;
           //clear alarm when pwm duty changes
         end
@@ -446,27 +445,28 @@ always @(posedge up_clk)
           //tacho_alarm is only asserted for certain known pwm duty cycles and
           //for timeout
           up_tacho_avg_sum <= tacho_avg_sum [31:7];
-          if (pwm_ontime == PWM_ONTIME_25) begin
+          tacho_meas_int <= 1'b1;
+          if ((pwm_width == PWM_ONTIME_25) && (up_tacho_en == 0)) begin
             if ((tacho_avg_sum [31:7] > TACHO_T25 + TACHO_T25_TOL) || (tacho_avg_sum [31:7] < TACHO_T25 - TACHO_T25_TOL)) begin
               //the fan is turning but not as expected
               tacho_alarm <= 1'b1;
             end
-          end else if (pwm_ontime == PWM_ONTIME_50) begin
+          end else if ((pwm_width == PWM_ONTIME_50) && (up_tacho_en == 0)) begin
             if ((tacho_avg_sum [31:7] > TACHO_T50 + TACHO_T50_TOL) || (tacho_avg_sum [31:7] < TACHO_T50 - TACHO_T50_TOL)) begin
               //the fan is turning but not as expected
               tacho_alarm <= 1'b1;
             end
-          end else if (pwm_ontime == PWM_ONTIME_75) begin
+          end else if ((pwm_width == PWM_ONTIME_75) && (up_tacho_en == 0)) begin
             if ((tacho_avg_sum [31:7] > TACHO_T75 + TACHO_T75_TOL) || (tacho_avg_sum [31:7] < TACHO_T75 - TACHO_T75_TOL)) begin
               //the fan is turning but not as expected
               tacho_alarm <= 1'b1;
             end
-          end else if (pwm_ontime == PWM_PERIOD) begin
+          end else if ((pwm_width == PWM_PERIOD) && (up_tacho_en == 0)) begin
             if ((tacho_avg_sum [31:7] > TACHO_T100 + TACHO_T100_TOL) || (tacho_avg_sum [31:7] < TACHO_T100 - TACHO_T100_TOL)) begin
               //the fan is turning but not as expected
               tacho_alarm <= 1'b1;
             end
-          end else if ((pwm_ontime == up_pwm_ontime) && up_tacho_en ) begin
+          end else if ((pwm_width == up_pwm_width) && up_tacho_en) begin
             if ((tacho_avg_sum [31:7] > up_tacho_val + up_tacho_tol) || (tacho_avg_sum [31:7] < up_tacho_val - up_tacho_tol)) begin
               //the fan is turning but not as expected
               tacho_alarm <= 1'b1;
@@ -483,63 +483,63 @@ always @(posedge up_clk)
 
 //axi registers write
 always @(posedge up_clk) begin
-  if (sys_resetn == 1'b0) begin
+  if (s_axi_aresetn == 1'b0) begin
     up_wack <= 'd0;
-    up_pwm_ontime <= 'd0;
+    up_pwm_width <= 'd0;
     up_tacho_val <= 'd0;
     up_tacho_tol <= 'd0;
     up_tacho_en <= 'd0;
     up_scratch <= 'd0;
-    up_irq_mask <= 3'b111;
-    up_resetn <= 1'd1;
+    up_irq_mask <= 4'b1111;
+    up_resetn <= 1'd0;
   end else begin
     up_wack <= up_wreq_s;
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h10)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 8'h20)) begin
       up_resetn <= up_wdata_s[0];
-    end  
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h02)) begin
+    end
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 8'h02)) begin
       up_scratch <= up_wdata_s;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h11)) begin
-      up_pwm_ontime <= up_wdata_s;
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 8'h21)) begin
+      up_pwm_width <= up_wdata_s;
       up_tacho_en <= 1'b0;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h15)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 8'h22)) begin
       up_tacho_val <= up_wdata_s;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h16)) begin
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 8'h23)) begin
       up_tacho_tol <= up_wdata_s;
       up_tacho_en <= 1'b1;
     end
-    if ((up_wreq_s == 1'b1) && (up_waddr_s == 5'h17)) begin
-      up_irq_mask <= up_wdata_s[2:0];
+    if ((up_wreq_s == 1'b1) && (up_waddr_s == 8'h10)) begin
+      up_irq_mask <= up_wdata_s[3:0];
     end
   end
 end
 
 //axi registers read
 always @(posedge up_clk) begin
-  if (sys_resetn == 1'b0) begin
+  if (s_axi_aresetn == 1'b0) begin
     up_rack <= 'd0;
     up_rdata <= 'd0;
   end else begin
     up_rack <= up_rreq_s;
     if (up_rreq_s == 1'b1) begin
       case (up_raddr_s)
-        5'h00: up_rdata <= CORE_VERSION;
-        5'h01: up_rdata <= ID;
-        5'h02: up_rdata <= up_scratch;
-        5'h03: up_rdata <= CORE_MAGIC;
-        5'h10: up_rdata <= up_resetn;
-        5'h11: up_rdata <= pwm_ontime;
-        5'h12: up_rdata <= PWM_PERIOD;
-        5'h13: up_rdata <= up_tacho_avg_sum;
-        5'h14: up_rdata <= sysmone_temp;
-        5'h15: up_rdata <= up_tacho_val;
-        5'h16: up_rdata <= up_tacho_tol;
-        5'h17: up_rdata <= up_irq_mask;
-        5'h18: up_rdata <= up_irq_pending;
-        5'h19: up_rdata <= up_irq_source;
+        8'h00: up_rdata <= CORE_VERSION;
+        8'h01: up_rdata <= ID;
+        8'h02: up_rdata <= up_scratch;
+        8'h03: up_rdata <= CORE_MAGIC;
+        8'h20: up_rdata <= up_resetn;
+        8'h21: up_rdata <= pwm_width;
+        8'h30: up_rdata <= PWM_PERIOD;
+        8'h31: up_rdata <= up_tacho_avg_sum;
+        8'h32: up_rdata <= sysmone_temp;
+        8'h22: up_rdata <= up_tacho_val;
+        8'h23: up_rdata <= up_tacho_tol;
+        8'h10: up_rdata <= up_irq_mask;
+        8'h11: up_rdata <= up_irq_pending;
+        8'h12: up_rdata <= up_irq_source;
         default: up_rdata <= 0;
       endcase
     end else begin
@@ -550,7 +550,7 @@ end
 
 //IRQ handling
 always @(posedge up_clk) begin
-  if (sys_resetn == 1'b0) begin
+  if (up_resetn == 1'b0) begin
     irq <= 1'b0;
   end else begin
     irq <= |up_irq_pending;
@@ -558,8 +558,8 @@ always @(posedge up_clk) begin
 end
 
 always @(posedge up_clk) begin
-  if (sys_resetn == 1'b0) begin
-    up_irq_source <= 3'b000;
+  if (up_resetn == 1'b0) begin
+    up_irq_source <= 4'b0000;
   end else begin
     up_irq_source <= up_irq_trigger | (up_irq_source & ~up_irq_source_clear);
   end
@@ -567,7 +567,7 @@ end
 
 //tacho measurement logic
 always @(posedge up_clk) begin
-  if (sys_resetn == 1'b0) begin
+  if (up_resetn == 1'b0) begin
     tacho_edge_det <= 'h0;
     tacho_meas <= 'h0;
     tacho_meas_new <= 'h0;
@@ -591,7 +591,7 @@ end
 
 //pwm change proc
 always @(posedge up_clk) begin
-  if (sys_resetn == 1'b0) begin
+  if (up_resetn == 1'b0) begin
     pwm_change_done <= 1'b1;
   end else if (counter_overflow) begin
     pwm_change_done <= 1'b1;
@@ -602,7 +602,7 @@ end
 
 //tacho measurement and pwm change delay counter
 always @(posedge up_clk) begin
-  if ((sys_resetn & counter_resetn) == 1'b0) begin
+  if ((up_resetn & counter_resetn) == 1'b0) begin
     counter_reg <= 'h0;
     counter_overflow <= 1'b0;
   end else begin
