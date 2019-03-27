@@ -174,6 +174,11 @@ module axi_adc_trigger #(
 
   reg                   trigger_pin_a;
   reg                   trigger_pin_b;
+  reg        [ 1:0]     trigger_o_m;
+  reg        [ 1:0]     trigger_o_m_1;
+
+  reg                   trig_o_hold;
+  reg        [ 2:0]     trig_o_hold_cnt;
 
   reg                   trigger_adc_a;
   reg                   trigger_adc_b;
@@ -226,22 +231,41 @@ module axi_adc_trigger #(
 
   always @(*) begin
     case(io_selection[4:2])
-      3'h0: trigger_o[0] = trigger_up_o_s[0];
-      3'h1: trigger_o[0] = trigger_i[0];
-      3'h2: trigger_o[0] = trigger_i[1];
-      3'h3: trigger_o[0] = trigger_out_mixed;
-      3'h4: trigger_o[0] = trigger_in;
-      default: trigger_o[0] = trigger_up_o_s[0];
+      3'h0: trigger_o_m[0] = trigger_up_o_s[0];
+      3'h1: trigger_o_m[0] = trigger_i[0];
+      3'h2: trigger_o_m[0] = trigger_i[1];
+      3'h3: trigger_o_m[0] = trigger_out_mixed;
+      3'h4: trigger_o_m[0] = trigger_in;
+      default: trigger_o_m[0] = trigger_up_o_s[0];
     endcase
     case(io_selection[7:5])
-      3'h0: trigger_o[1] = trigger_up_o_s[1];
-      3'h1: trigger_o[1] = trigger_i[1];
-      3'h2: trigger_o[1] = trigger_i[0];
-      3'h3: trigger_o[1] = trigger_out_mixed;
-      3'h4: trigger_o[1] = trigger_in;
-      default: trigger_o[1] = trigger_up_o_s[1];
+      3'h0: trigger_o_m[1] = trigger_up_o_s[1];
+      3'h1: trigger_o_m[1] = trigger_i[1];
+      3'h2: trigger_o_m[1] = trigger_i[0];
+      3'h3: trigger_o_m[1] = trigger_out_mixed;
+      3'h4: trigger_o_m[1] = trigger_in;
+      default: trigger_o_m[1] = trigger_up_o_s[1];
     endcase
   end
+
+  // external trigger output hold 10 clock cycles on polarity change
+  always @(posedge clk) begin
+    if ((trigger_o_m != trigger_o_m_1) & (trig_o_hold_cnt == 3'h0)) begin
+      trig_o_hold_cnt <= 3'h7;
+      trig_o_hold <= 1'b1;
+    end
+    if (trig_o_hold_cnt != 3'h0) begin
+      trig_o_hold_cnt <= trig_o_hold_cnt - 3'h1;
+      trig_o_hold <= 1'b1;
+    end else begin
+      trig_o_hold <= 1'b0;
+    end
+    trigger_o_m_1 <= trigger_o_m;
+  end
+
+  // glitches shorter than 1 clock cycle may appear and should be rejected by
+  // filters on hardware
+  assign trigger_o = trigger_o_m | trig_o_hold;
 
   // - keep data in sync with the trigger (trigger bypasses the variable fifo
   // the data goes through and it is delayed with 3 clock cycles)
