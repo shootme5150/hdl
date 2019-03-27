@@ -48,7 +48,7 @@ module axi_adc_trigger #(
   input                 trigger_in,
 
   input       [ 1:0]    trigger_i,
-  output reg  [ 1:0]    trigger_o,
+  output      [ 1:0]    trigger_o,
   output      [ 1:0]    trigger_t,
 
   input       [15:0]    data_a,
@@ -56,11 +56,12 @@ module axi_adc_trigger #(
   input                 data_valid_a,
   input                 data_valid_b,
 
-  output      [15:0]    data_a_trig,
-  output      [15:0]    data_b_trig,
+  output reg  [15:0]    data_a_trig,
+  output reg  [15:0]    data_b_trig,
   output                data_valid_a_trig,
   output                data_valid_b_trig,
-  output                trigger_out,
+  output reg            trigger_out,
+  output reg            trigger_out_express,
 
   output      [31:0]    fifo_depth,
 
@@ -147,6 +148,10 @@ module axi_adc_trigger #(
   wire                  streaming;
   wire                  trigger_out_s;
   wire                  embedded_trigger;
+  wire                  external_trigger;
+  wire                  external_trig_selected;
+  wire                  delayed_external_trigger;
+  wire                  non_zero_delay;
 
   reg                   trigger_a_d1; // synchronization flip flop
   reg                   trigger_a_d2; // synchronization flip flop
@@ -193,6 +198,10 @@ module axi_adc_trigger #(
 
   reg        [31:0]     trigger_delay_counter;
   reg                   triggered;
+  reg                   trigger_out_m1;
+  reg                   trigger_out_m2;
+  reg                   trigger_out_m3;
+  reg                   wait_for_external_trig;
 
   reg                   streaming_on;
 
@@ -234,9 +243,39 @@ module axi_adc_trigger #(
     endcase
   end
 
-  assign data_a_trig = (embedded_trigger ==  1'h0) ? {data_a_r[14],data_a_r} : {trigger_out_s,data_a_r};
-  assign data_b_trig = (embedded_trigger ==  1'h0) ? {data_b_r[14],data_b_r} : {trigger_out_s,data_b_r};
-  assign trigger_out = trigger_out_s;
+  // - keep data in sync with the trigger (trigger bypasses the variable fifo
+  // the data goes through and it is delayed with 3 clock cycles)
+  // - when an external trigger is detected it is already delayed with 3 clock cycles
+  assign external_trig_selected = ~(| io_selection[1:0]);
+  assign external_trigger = trigger_pin_a | trigger_pin_b;
+
+  // because of the delay topology the external trigger has priority
+  always @(posedge clk) begin
+    if (external_trig_selected & delayed_external_trigger) begin
+      wait_for_external_trig <= 1'b1;
+    end
+    if (external_trig_selected &
+       ((external_trigger & trigger_out_s & ~non_zero_delay) |
+        (wait_for_external_trig & trigger_out_s))) begin
+      trigger_out <= trigger_out_s;
+      wait_for_external_trig <= 1'b0;
+    end else begin
+      trigger_out <= trigger_out_m3;
+      trigger_out_m1 <= trigger_out_s;
+    end
+    trigger_out_m2 <= trigger_out_m1;
+    trigger_out_m3 <= trigger_out_m2;
+
+    trigger_out_express <= trigger_out_mixed;
+
+    // the embedded trigger does not require any extra delay, since the util_extract
+    // present in this case, delays the end trigger with 3 clock cycles
+    data_a_trig <= (embedded_trigger == 1'h0) ? {data_a_r[14],data_a_r} : {trigger_out_s,data_a_r};
+    data_b_trig <= (embedded_trigger == 1'h0) ? {data_b_r[14],data_b_r} : {trigger_out_s,data_b_r};
+  end
+
+  assign non_zero_delay = | trigger_delay;
+  assign delayed_external_trigger = (trigger_out_mixed & external_trigger & non_zero_delay);
 
   assign embedded_trigger = trigger_out_control[16];
   assign trigger_out_s = (trigger_delay == 32'h0) ? (trigger_out_mixed | streaming_on) :
